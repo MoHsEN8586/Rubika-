@@ -1,0 +1,9 @@
+rubpy
+pyRubika
+RubikaBot
+pyrubika
+requests
+httpx
+flask
+fastapi
+برنامه
