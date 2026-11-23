@@ -6,4 +6,3 @@ requests
 httpx
 flask
 fastapi
-برنامه
