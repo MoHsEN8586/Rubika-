@@ -8,7 +8,7 @@ from flask import Flask, jsonify
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
-TOKEN = os.environ.get("RUBIKA_BOT_TOKEN", "CJGAJC0DBPYNSYQWYZNRHOQRWIBJCIRXYEWKWFSHFWIRSXYBYFZBKXRXXGCBZQQG").strip()
+TOKEN = os.environ.get("RUBIKA_BOT_TOKEN", "CJGAJC0DBPYNSYQWYZNRHOQRWIBJCIRXYEWKWFSHFWIRSXYBYFZBKXRXXQG").strip()
 if not TOKEN:
     raise RuntimeError("RUBIKA_BOT_TOKEN environment variable is missing.")
 
