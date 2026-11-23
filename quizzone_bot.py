@@ -13,7 +13,7 @@ from datetime import datetime
 
 import requests
 
-TOKEN = os.getenv("RUBIKA_BOT_TOKEN", "CJGAJC0DBPYNSYQWYZNRHOQRWIBJCIRXYEWKWFSHFWIRSXYBYFZBKXRXXGCBZQQG").strip()
+TOKEN = os.getenv("RUBIKA_BOT_TOKEN", "").strip()
 if not TOKEN:
     raise RuntimeError("Set RUBIKA_BOT_TOKEN in your environment.")
 
@@ -55,6 +55,12 @@ db.execute("""
 CREATE TABLE IF NOT EXISTS states(
   chat_id TEXT PRIMARY KEY,
   state_json TEXT NOT NULL
+)
+""")
+db.execute("""
+CREATE TABLE IF NOT EXISTS processed_updates(
+  update_key TEXT PRIMARY KEY,
+  processed_at REAL NOT NULL
 )
 """)
 db.commit()
@@ -320,8 +326,18 @@ def process_message(update):
     message = update.get("new_message") or {}
     if not chat_id or not isinstance(message, dict):
         return
-    if message.get("sender_type") == "Bot":
+
+    # Ignore bot-originated updates and deduplicate retries from the API.
+    if str(message.get("sender_type", "")).lower() == "bot":
         return
+    update_key = str(update.get("update_id") or message.get("message_id") or "")
+    if update_key:
+        already = db.execute("SELECT 1 FROM processed_updates WHERE update_key=?", (update_key,)).fetchone()
+        if already:
+            return
+        db.execute("INSERT OR IGNORE INTO processed_updates(update_key,processed_at) VALUES(?,?)", (update_key, time.time()))
+        db.commit()
+
     text = (message.get("text") or "").strip()
     if not text:
         return
@@ -371,7 +387,8 @@ def process_message(update):
     if state:
         handle_game(chat_id, text, state)
     else:
-        send(chat_id, "متوجه نشدم 🙂\nبرای دیدن بازی‌ها «منو» یا «راهنما» را بفرست.")
+        # Unknown messages outside a game are intentionally ignored to prevent spam.
+        return
 
 def run():
     offset_id = None
@@ -392,6 +409,12 @@ def run():
             next_offset = result.get("next_offset_id") if isinstance(result, dict) else None
             if next_offset:
                 offset_id = str(next_offset)
+            elif updates:
+                # Fallback: use the last update's ID if the API omits next_offset_id.
+                last_update = updates[-1] if isinstance(updates[-1], dict) else {}
+                fallback_id = last_update.get("update_id") or last_update.get("message_id")
+                if fallback_id:
+                    offset_id = str(fallback_id)
             time.sleep(POLL_DELAY)
         except requests.RequestException:
             logging.exception("Network/API error")
@@ -402,3 +425,4 @@ def run():
 
 if __name__ == "__main__":
     run()
+
