@@ -1,6 +1,5 @@
 rubpy
 pyRubika
-RubikaBot
 pyrubika
 requests
 httpx
