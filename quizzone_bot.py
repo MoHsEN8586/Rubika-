@@ -13,7 +13,7 @@ from datetime import datetime
 
 import requests
 
-TOKEN = os.getenv("RUBIKA_BOT_TOKEN", "").strip()
+TOKEN = os.getenv("RUBIKA_BOT_TOKEN", "CJGAJC0DBPYNSYQWYZNRHOQRWIBJCIRXYEWKWFSHFWIRSXYBYFZBKXRXXGCBZQQG").strip()
 if not TOKEN:
     raise RuntimeError("Set RUBIKA_BOT_TOKEN in your environment.")
 
