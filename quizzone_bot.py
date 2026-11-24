@@ -7,6 +7,7 @@
 import os, time, json, sqlite3, random, hashlib, logging, re, secrets
 from datetime import datetime, date
 import requests
+from flask import Flask, request, jsonify
 
 TOKEN = os.getenv('RUBIKA_BOT_TOKEN', '').strip()
 ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', '').strip()
@@ -71,9 +72,18 @@ def api(method, payload=None):
 def data_of(resp):
     return resp.get('data') if isinstance(resp, dict) and isinstance(resp.get('data'), dict) else resp
 
-def send(chat_id, text):
+def send(chat_id, text, inline_keypad=None):
     if chat_id and text:
-        api('sendMessage', {'chat_id': str(chat_id), 'text': str(text)[:4000]})
+        payload = {'chat_id': str(chat_id), 'text': str(text)[:4000]}
+        if inline_keypad:
+            payload['inline_keypad'] = inline_keypad
+        api('sendMessage', payload)
+
+def glass_button(text, button_id):
+    return {'type': 'Simple', 'button_text': text, 'id': button_id}
+
+def inline_keyboard(rows):
+    return {'rows': [{'buttons': [glass_button(t, bid) for t, bid in row]} for row in rows]}
 
 def get_updates(offset):
     payload = {'limit': 100}
@@ -278,44 +288,60 @@ def profile(chat_id,uid):
     send(chat_id,f'👤 {r["name"]}\n🏆 رتبه: {rank}\n⭐ امتیاز: {r["score"]}\n🎮 بازی‌ها: {r["games"]}\n✅ پاسخ درست: {r["correct"]}\n🔥 زنجیره فعلی: {r["streak"]}\n🏅 بهترین زنجیره: {r["best_streak"]}\n🎖 دستاوردها: {len(ach)}')
 
 # ---- Admin ----
-def admin_prompt(uid,chat_id):
-    if not private_chat(chat_id,uid,'private'):
-        send(chat_id,'🔐 برای امنیت، ورود پنل فقط در گفت‌وگوی خصوصی انجام می‌شود.'); return
-    bound=admin_id()
-    if bound and bound!=uid:
-        send(chat_id,'⛔ پنل قبلاً به حساب مدیر دیگری متصل شده است.'); return
-    with db() as c: c.execute('INSERT OR REPLACE INTO admin_sessions VALUES(?,?,?)',(uid,'password',int(time.time())+SESSION_SECONDS)); c.commit()
-    send(chat_id,'🔐 رمز پنل را ارسال کن. زمان ورود ۲ دقیقه است.\n(رمز را فقط در همین گفت‌وگوی خصوصی بفرست.)')
-
 def admin_menu(chat_id):
-    send(chat_id,'🛠 پنل QuizZone\n\n/stats — آمار کلی\n/users — فهرست کاربران\n/requests — درخواست‌های فعال‌سازی\n/groups — گروه‌های فعال\n/approve CODE — تأیید درخواست\n/reject CODE — رد درخواست\n/ban ID — مسدود کردن\n/unban ID — رفع مسدودی\n/user ID — جزئیات کاربر\n/logout — خروج از پنل')
+    keyboard = inline_keyboard([
+        [('📊 آمار کلی', 'adm:stats'), ('👥 کاربران', 'adm:users')],
+        [('📨 درخواست‌ها', 'adm:requests'), ('👨‍👩‍👧 گروه‌ها', 'adm:groups')],
+        [('🚪 خروج از پنل', 'adm:logout')]
+    ])
+    send(chat_id, '🛡 پنل مدیریت QuizZone\nیکی از بخش‌های زیر را انتخاب کن:', keyboard)
+
+def admin_login(uid, chat_id):
+    bound = admin_id()
+    if bound and bound != uid:
+        send(chat_id, '⛔ پنل قبلاً به حساب مدیر دیگری متصل شده است.')
+        return
+    if not bound:
+        set_admin_id(uid)
+    with db() as c:
+        c.execute('INSERT OR REPLACE INTO admin_sessions VALUES(?,?,?)',
+                  (uid, 'authorized', int(time.time()) + ADMIN_SESSION_SECONDS))
+        c.commit()
+    send(chat_id, '✅ رمز صحیح است؛ مستقیم وارد پنل مدیریت شدی.')
+    admin_menu(chat_id)
 
 def admin_auth(uid,chat_id,text):
-    with db() as c: s=c.execute('SELECT * FROM admin_sessions WHERE user_id=?',(uid,)).fetchone()
-    if not s: return False
-    if s['expires']<int(time.time()):
-        with db() as c: c.execute('DELETE FROM admin_sessions WHERE user_id=?',(uid,)); c.commit()
-        send(chat_id,'⌛ نشست منقضی شد. دوباره /mohsenbot را بزن.'); return True
-    if s['state']=='password':
-        if secrets.compare_digest(text,ADMIN_PASSWORD):
-            if not admin_id(): set_admin_id(uid) # first successful login binds admin
-            if admin_id()!=uid:
-                with db() as c: c.execute('DELETE FROM admin_sessions WHERE user_id=?',(uid,)); c.commit()
-                send(chat_id,'⛔ این حساب مدیر نیست.'); return True
-            with db() as c: c.execute('UPDATE admin_sessions SET state="authorized",expires=? WHERE user_id=?',(int(time.time())+ADMIN_SESSION_SECONDS,uid)); c.commit()
-            send(chat_id,'✅ ورود موفق؛ پنل باز شد.'); admin_menu(chat_id)
-        else:
-            with db() as c: c.execute('DELETE FROM admin_sessions WHERE user_id=?',(uid,)); c.commit()
-            send(chat_id,'❌ رمز اشتباه بود. دوباره /mohsenbot را ارسال کن.')
+    # The password itself is the login trigger; no /mohsenbot command is required.
+    if text == ADMIN_PASSWORD:
+        admin_login(uid, chat_id)
         return True
-    return s['state']=='authorized'
+    with db() as c:
+        s=c.execute('SELECT * FROM admin_sessions WHERE user_id=?',(uid,)).fetchone()
+    if not s: return False
+    if s['expires'] < int(time.time()):
+        with db() as c: c.execute('DELETE FROM admin_sessions WHERE user_id=?',(uid,)); c.commit()
+        send(chat_id,'⌛ نشست پنل منقضی شده؛ برای ورود دوباره رمز را ارسال کن.')
+        return True
+    return s['state'] == 'authorized'
 
 def is_admin(uid):
     with db() as c: s=c.execute('SELECT state,expires FROM admin_sessions WHERE user_id=?',(uid,)).fetchone()
     return bool(s and s['state']=='authorized' and s['expires']>=int(time.time()) and admin_id()==uid)
 
-def handle_admin(uid,chat_id,text):
+def handle_admin(uid,chat_id,text,button_id=None):
     if not is_admin(uid): return False
+    if button_id:
+        action = button_id.removeprefix('adm:')
+        if action == 'logout':
+            with db() as c: c.execute('DELETE FROM admin_sessions WHERE user_id=?',(uid,)); c.commit()
+            send(chat_id, 'از پنل خارج شدی.'); return True
+        if action == 'stats': text='/stats'
+        elif action == 'users': text='/users'
+        elif action == 'requests': text='/requests'
+        elif action == 'groups': text='/groups'
+        elif action.startswith('approve:'): text='/approve ' + action.split(':',1)[1]
+        elif action.startswith('reject:'): text='/reject ' + action.split(':',1)[1]
+        else: return True
     if text=='/logout':
         with db() as c: c.execute('DELETE FROM admin_sessions WHERE user_id=?',(uid,)); c.commit()
         send(chat_id,'از پنل خارج شدی.'); return True
@@ -328,7 +354,14 @@ def handle_admin(uid,chat_id,text):
         send(chat_id,'👥 ۲۵ کاربر اخیر:\n'+('\n'.join(f'{r["name"]} | {r["user_id"]} | ⭐{r["score"]} | بازی {r["games"]} | '+('مسدود' if r['banned'] else 'فعال') for r in rows) if rows else 'کاربری نیست.')); return True
     if text=='/requests':
         with db() as c: rows=c.execute("SELECT code,chat_id,requester,title,created_at FROM requests WHERE status='pending' ORDER BY created_at DESC LIMIT 30").fetchall()
-        send(chat_id,'📨 درخواست‌ها:\n'+('\n'.join(f'{r["code"]} | {r["title"]} | گروه {r["chat_id"]} | درخواست‌کننده {r["requester"]}' for r in rows) if rows else 'درخواست معلقی وجود ندارد.')); return True
+        
+        if not rows:
+            send(chat_id,'📨 درخواست معلقی وجود ندارد.')
+        else:
+            for r in rows:
+                kb=inline_keyboard([[('✅ تأیید',f'adm:approve:{r["code"]}'),('❌ رد',f'adm:reject:{r["code"]}')]])
+                send(chat_id,f'📨 درخواست فعال‌سازی\nگروه: {r["title"]}\nشناسه: {r["chat_id"]}\nدرخواست‌کننده: {r["requester"]}\nکد: {r["code"]}',kb)
+        return True
     if text=='/groups':
         with db() as c: rows=c.execute('SELECT chat_id,title,activated_at FROM groups WHERE active=1 ORDER BY activated_at DESC').fetchall()
         send(chat_id,'🟢 گروه‌های فعال:\n'+('\n'.join(f'{r["title"]} | {r["chat_id"]} | {r["activated_at"]}' for r in rows) if rows else 'گروهی فعال نیست.')); return True
@@ -368,24 +401,29 @@ def request_activation(chat_id,uid,title):
     with db() as c: c.execute('INSERT INTO requests VALUES(?,?,?,?,?,?)',(code,chat_id,uid,title,datetime.now().isoformat(),'pending')); c.commit()
     send(chat_id,'📨 درخواست فعال‌سازی ثبت شد. پس از بررسی مدیر اطلاع داده می‌شود.');
     aid=admin_id()
-    if aid: send(aid,f'📨 درخواست جدید فعال‌سازی\nگروه: {title}\nشناسه: {chat_id}\nدرخواست‌کننده: {uid}\nکد: {code}\n\n/requests سپس /approve {code} یا /reject {code}')
+    if aid:
+        kb=inline_keyboard([[('✅ تأیید درخواست',f'adm:approve:{code}'),('❌ رد درخواست',f'adm:reject:{code}')]])
+        send(aid,f'📨 درخواست جدید فعال‌سازی\nگروه: {title}\nشناسه: {chat_id}\nدرخواست‌کننده: {uid}\nکد: {code}',kb)
 
 # ---- Routing ----
-def handle(chat_id,uid,text,name,title,ctype,sender_type=''):
+def handle(chat_id,uid,text,name,title,ctype,sender_type='',button_id=None):
     if not chat_id or not uid or not text: return
     # Ignore bot-originated updates to avoid loops.
     if sender_type in ('bot','rubika_bot'): return
     ensure_user(uid,name)
     if banned(uid): send(chat_id,'⛔ دسترسی شما محدود شده است.'); return
     private=private_chat(chat_id,uid,ctype)
-    if text=='/mohsenbot':
-        if not private: send(chat_id,'برای امنیت، دستور /mohsenbot را فقط در خصوصی بفرست.'); return
-        admin_prompt(uid,chat_id); return
     if private:
-        if admin_auth(uid,chat_id,text):
-            if text!='ADMIN_PASSWORD': handle_admin(uid,chat_id,text)
+        # Admin password is sent as a normal private message; successful entry opens the panel.
+        if text == ADMIN_PASSWORD:
+            admin_auth(uid, chat_id, text)
             return
-        if handle_admin(uid,chat_id,text): return
+        if is_admin(uid):
+            handle_admin(uid, chat_id, text, button_id)
+            return
+    if button_id and private and is_admin(uid):
+        handle_admin(uid, chat_id, text, button_id)
+        return
     if text in ('/start','شروع'):
         send(chat_id,'🎮 سلام! به QuizZone پیشرفته خوش آمدی.\n\n/quiz — سؤال جدید\n/leaderboard — جدول رتبه‌ها\n/profile — پروفایل\n/daily — جایزه روزانه\n/help — راهنما\n\nبرای فعال‌سازی در گروه، داخل گروه /activate را بفرست.'); return
     if text in ('/help','/menu','راهنما'):
@@ -434,6 +472,73 @@ def main():
         except KeyboardInterrupt: break
         except Exception: logging.exception('Polling error'); time.sleep(5)
 
-if __name__=='__main__': main()
+# ---- Webhook server for Render ----
+app = Flask(__name__)
+init_db()  # Gunicorn imports the module without running __main__.
 
+@app.get('/')
+def health():
+    return jsonify({'ok': True, 'service': 'QuizZone', 'webhook': '/webhook'})
+
+def process_webhook_payload(payload):
+    if not isinstance(payload, dict):
+        return
+    # Rubika may deliver regular updates or inline button callbacks in different envelopes.
+    candidates = []
+    if isinstance(payload.get('inline_message'), dict):
+        candidates.append(payload['inline_message'])
+    if isinstance(payload.get('update'), dict):
+        candidates.append(payload['update'])
+    if isinstance(payload.get('data'), dict):
+        d = payload['data']
+        if isinstance(d.get('inline_message'), dict): candidates.append(d['inline_message'])
+        if isinstance(d.get('update'), dict): candidates.append(d['update'])
+    if isinstance(payload.get('new_message'), dict) or isinstance(payload.get('message'), dict):
+        candidates.append(payload)
+    if not candidates:
+        candidates.append(payload)
+    for item in candidates:
+        # Inline callback object has sender_id/chat_id/text/aux_data.
+        msg = item.get('new_message') or item.get('message') or item
+        if not isinstance(msg, dict): continue
+        aux = msg.get('aux_data') or item.get('aux_data') or {}
+        button_id = aux.get('button_id', '') if isinstance(aux, dict) else ''
+        chat_id = str(item.get('chat_id') or msg.get('chat_id') or msg.get('object_guid') or '')
+        uid = str(msg.get('sender_id') or item.get('sender_id') or '')
+        text = str(msg.get('text') or item.get('text') or '').strip()
+        msgid = str(msg.get('message_id') or item.get('message_id') or '')
+        raw_type = str(item.get('chat_type') or msg.get('chat_type') or '').lower()
+        if raw_type:
+            ctype = raw_type
+        elif chat_id.startswith('b0'):
+            ctype = 'private'
+        elif chat_id.startswith('g0'):
+            ctype = 'group'
+        elif chat_id.startswith('c0'):
+            ctype = 'channel'
+        else:
+            ctype = 'group'
+        title = str(item.get('chat_title') or msg.get('chat_title') or 'گروه')
+        sender_type = str(msg.get('sender_type') or '')
+        if msgid and not mark_seen(msgid):
+            continue
+        if chat_id and uid and (text or button_id):
+            handle(chat_id, uid, text, str(msg.get('sender_name') or 'کاربر'), title, ctype, sender_type, button_id)
+
+@app.post('/webhook')
+@app.post('/receiveUpdate')
+@app.post('/receiveInlineMessage')
+def webhook():
+    payload = request.get_json(silent=True) or {}
+    try:
+        process_webhook_payload(payload)
+        return jsonify({'ok': True}), 200
+    except Exception:
+        logging.exception('Webhook processing failed')
+        return jsonify({'ok': False}), 500
+
+if __name__ == '__main__':
+    init_db()
+    port = int(os.getenv('PORT', '10000'))
+    app.run(host='0.0.0.0', port=port)
 
